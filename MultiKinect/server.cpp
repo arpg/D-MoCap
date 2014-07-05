@@ -27,6 +27,7 @@
 #include <HAL/Utils/GetPot>
 #include <HAL/Utils/TicToc.h>
 #include <HAL/Camera/CameraDevice.h>
+#include <PbMsgs/DensePose.pb.h>
 #include <calibu/Calibu.h>
 #include <CVars/CVar.h>
 
@@ -54,46 +55,33 @@ int main( int argc, char* argv[] )
 
   }
 
-  const int originalWidth = camera.Width();
-  const int originalHeight = camera.Height();
-  std::cout << "- Image Dimensions: " << originalWidth << "x" << originalHeight
-            << std::endl;
+  pb::DensePoseMsg dense_pose_msg_;
 
-  const unsigned int imageLevel = level;
-  const unsigned int imageWidth = originalWidth >> level;
-  const unsigned int imageHeight = originalHeight >> level;
 
-  if (level != 0) {
-    std::cout << "- Images exceed maximum dimensions. Using level: " <<
-                 imageLevel << std::endl;
-    std::cout << "- NEW Image Dimensions: " << imageWidth << "x" << imageHeight
-              << std::endl;
-  }
+  const int imageWidth = 640; //camera.Width();
+  const int imageHeight = 480; //camera.Height();
 
   ///----- Load camera model.
   calibu::CameraRig rig;
-  if (!camera.GetDeviceProperty(hal::DeviceDirectory).empty()) {
-    std::cout<<"Loaded camera: "<<camera.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod")<<std::endl;
-    rig = calibu::ReadXmlRig(camera.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod"));
-  }
-  else {
+//  if (!camera.GetDeviceProperty(hal::DeviceDirectory).empty()) {
+//    std::cout<<"Loaded camera: "<<camera.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod")<<std::endl;
+//    rig = calibu::ReadXmlRig(camera.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod"));
+//  }
+//  else {
     rig = calibu::ReadXmlRig(clArgs.follow("cameras.xml", "-cmod"));
-  }
+//  }
 
   // Force vision convention.
   rig = calibu::ToCoordinateConvention(rig, calibu::RdfVision);
 
-  cudaClass cuda;
-  Eigen::Matrix3f K, Kinv;
-  K = rig.cameras[0].camera.K().cast<float>();
-  Kinv = K.inverse();
+  Eigen::Matrix3f KL;
+  KL = rig.cameras[0].camera.K().cast<float>();
 
 
   ///----- Init aux variables and dense tracker.
 
   const bool use_colour = false;
 
-  std::vector<pangolin::Image<unsigned char> > imgs;
   const int w = imageWidth;
   const int h = imageHeight;
 
@@ -190,9 +178,6 @@ int main( int argc, char* argv[] )
   float* depthBuffer = (float *) malloc(imageWidth*imageHeight*sizeof(float));
   SceneGraph::ImageView depthView;
   SceneGraph::ImageView currentView;
-  DepthHandler depthHandler(imageWidth, imageHeight, depthBuffer);
-  depthView.SetHandler( &depthHandler );
-  depthView.ToggleShow();
   container.AddDisplay( depthView );
   container.AddDisplay( currentView );
 
@@ -203,7 +188,6 @@ int main( int argc, char* argv[] )
   pangolin::RegisterKeyPressCallback('l', [&vol,&viewonly]() {LoadPXM("save.vol", vol); viewonly = true;} );
   //    pangolin::RegisterKeyPressCallback('s', [&vol,&colorVol,&keyframes,&rgb_fl,w,h]() {SavePXM("save.vol", vol); SaveMeshlab(vol,keyframes,rgb_fl,rgb_fl,w/2,h/2); } );
   pangolin::RegisterKeyPressCallback('s', [&vol,&colorVol]() {roo::SaveMesh("mesh",vol,colorVol); } );
-  pangolin::RegisterKeyPressCallback('d', [&]() { DumpDepthMap(depthBuffer, KLinv, imageWidth, imageHeight); } );
   pangolin::RegisterKeyPressCallback('/', [&]() {bStep = !bStep; } );
   //    pangolin::RegisterKeyPressCallback('s', [&vol]() {SavePXM("save.vol", vol); } );
 
@@ -309,7 +293,6 @@ int main( int argc, char* argv[] )
     adnormals.SetLevel(show_level);
     adrayimg.SetLevel(viewonly? 0 : show_level);
 
-     depthView.SetImage();
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glColor3f(1,1,1);
     pangolin::FinishFrame();
