@@ -27,87 +27,63 @@
 #include <HAL/Utils/GetPot>
 #include <HAL/Utils/TicToc.h>
 #include <HAL/Camera/CameraDevice.h>
-#include <PbMsgs/DensePose.pb.h>
 #include <calibu/Calibu.h>
 #include <CVars/CVar.h>
 
-#include <Node/Node.h>
-#include <PbMsgs/Matrix.h>
 #include <string>
 
 using namespace pangolin;
 
-bool Capture( node::node* n, const std::string topic, float* depth_buffer_, Sophus::SE3d &pose )
-{
-  pb::DensePoseMsg dpm;
-  if (n->receive( topic, dpm)) {
-    fprintf(stderr, "Message received loud and clear!\n");
-  } else {
-    fprintf(stderr, "No message received on: %s\n", topic.c_str());
-  }
-  fflush(stderr);
-  if (dpm.has_image()) {
-    const int image_size_ = dpm.image().image(0).width()*dpm.image().image(0).height()*sizeof(float);
-    memcpy(depth_buffer_, dpm.image().image(0).data().c_str(), image_size_);
-  }
-  if (dpm.has_pose()) {
-    Eigen::VectorXd p;
-    pb::ReadVector( dpm.pose().pose(), &p);
-  }
-}
+struct pni {  // pose 'n' intrinsics
+  Sophus::SE3d p;
+  roo::ImageIntrinsics i;
+};
 
 int main( int argc, char* argv[] )
 {
-  node::node server;
-  server.set_verbosity(9);
-  server.init("MKServer");
-
-  //  std::vector< node::node > nodes;
   // Initialise window
   View& container = SetupPangoGLWithCuda(1024, 768);
   SceneGraph::GLSceneGraph::ApplyPreferredGlSettings();
 
   GetPot clArgs(argc, argv);
-  const int num_nodes = atoi(clArgs.follow("0", "-nodes").c_str());
-
-//  std::vector< const std::string > topics;
-//  for(int ii = 0; ii < num_nodes; ii++) {
-//    std::stringstream temp;
-//    temp << "Node" << ii << "/DepthCam";
-//    const std::string topic = temp.str();
-//    topics.push_back( topic );
-//  }
-
-  const int imageWidth = 640; //camera.Width();
-  const int imageHeight = 480; //camera.Height();
 
   ///----- Load camera model.
+  hal::Camera cam(clArgs.follow("", "-cam"));
+  std::shared_ptr< pb::ImageArray > vImages = pb::ImageArray::Create();
   calibu::CameraRig rig;
-  //  if (!camera.GetDeviceProperty(hal::DeviceDirectory).empty()) {
-  //    std::cout<<"Loaded camera: "<<camera.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod")<<std::endl;
-  //    rig = calibu::ReadXmlRig(camera.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod"));
-  //  }
-  //  else {
-  rig = calibu::ReadXmlRig(clArgs.follow("cameras.xml", "-cmod"));
-  //  }
+  if (!cam.GetDeviceProperty(hal::DeviceDirectory).empty()) {
+    std::cout<<"Loaded camera: "<<cam.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod")<<std::endl;
+    rig = calibu::ReadXmlRig(cam.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod"));
+  }
+  else {
+    rig = calibu::ReadXmlRig(clArgs.follow("cameras.xml", "-cmod"));
+  }
 
-  // Force vision convention.
-  rig = calibu::ToCoordinateConvention(rig, calibu::RdfVision);
+  Eigen::Matrix3d KL;
 
-  Eigen::Matrix3f KL;
-  KL = rig.cameras[0].camera.K().cast<float>();
+  std::map< long int, pni > Ks;
+  for (int ii = 0; ii < rig.cameras.size(); ii++ ){
+    KL = rig.cameras[ii].camera.K();
+    pni temp;
+    roo::ImageIntrinsics temp_i(KL(0, 0),KL(1, 1), KL(0, 2), KL(1, 2) );
+    temp.i = temp_i;
+    temp.p = rig.cameras[ii].T_wc;
+    Ks.insert( std::pair< long int, pni >(rig.cameras[ii].camera.SerialNumber() , temp ) );
+  }
+
+
+  int w = cam.Width();
+  int h = cam.Height();
+
 
   ///----- Init aux variables and dense tracker.
 
   const bool use_colour = false;
 
-  const int w = imageWidth;
-  const int h = imageHeight;
-
   const int MaxLevels = 3;
   const int its[] = {1,0,2,3};
 
-  const roo::ImageIntrinsics K(KL(0, 0),KL(1, 1), KL(0, 2), KL(1, 2) );
+  roo::ImageIntrinsics K(KL(0, 0),KL(1, 1), KL(0, 2), KL(1, 2) );
 
   const double knear = 0.01;
   const double kfar = 1.0;
@@ -116,7 +92,6 @@ int main( int argc, char* argv[] )
   const int volres = 256;
 
   roo::BoundingBox reset_bb(make_float3(-volrad,-volrad,knear), make_float3(volrad,volrad,knear+2*volrad));
-  //    roo::BoundingBox reset_bb(make_float3(-volrad,-volrad,-volrad), make_float3(volrad,volrad,volrad));
 
 #ifdef HAVE_CVARS
   CVarUtils::AttachCVar<roo::BoundingBox>("BoundingBox", &reset_bb);
@@ -124,6 +99,7 @@ int main( int argc, char* argv[] )
 
   // Camera (rgb) to depth
   roo::Image<float, roo::TargetDevice, roo::Manage> dKinectMeters(w,h);
+  roo::Image<unsigned short, roo::TargetDevice, roo::Manage> dKinect(w,h);
   roo::Pyramid<float, MaxLevels, roo::TargetDevice, roo::Manage> kin_d(w,h);
   roo::Pyramid<float4, MaxLevels, roo::TargetDevice, roo::Manage> kin_v(w,h);
   roo::Pyramid<float4, MaxLevels, roo::TargetDevice, roo::Manage> kin_n(w,h);
@@ -194,7 +170,6 @@ int main( int argc, char* argv[] )
       .SetHandler(&rayhandler);
   container[3].SetDrawFunction(std::ref(adnormals));
 
-  float* depthBuffer = (float *) malloc(imageWidth*imageHeight*sizeof(float));
   SceneGraph::ImageView depthView;
   SceneGraph::ImageView currentView;
   container.AddDisplay( depthView );
@@ -210,45 +185,37 @@ int main( int argc, char* argv[] )
   pangolin::RegisterKeyPressCallback('/', [&]() {bStep = !bStep; } );
   //    pangolin::RegisterKeyPressCallback('s', [&vol]() {SavePXM("save.vol", vol); } );
 
-  Sophus::SE3d current_pose, rel, start, last;
-  bool started = false;
   reset = true;
-  Eigen::Matrix<double, 3, 1> sdf_trans;
-  sdf_trans << 0, 0, 0;
-  Sophus::SE3d Tws = Sophus::SE3d(Eigen::Matrix3d::Identity(), sdf_trans);
-
-  bool first;
 
   for(long frame=-1; !pangolin::ShouldQuit();)
   {
 
-    Capture( &server, "localsim/DepthCam", depthBuffer, rel);
     const bool go = !viewonly && (frame==-1 || run);
 
     const float trunc_dist = trunc_dist_factor*length(vol.VoxelSizeUnits());
 
     if(pangolin::Pushed(reset)) {
-      T_wl = Sophus::SE3d();
-      fuse = false;
-      started = false;
-
       vol.bbox = reset_bb;
       roo::SdfReset(vol, std::numeric_limits<float>::quiet_NaN() );
       keyframes.clear();
-
       frame = -1;
     }
 
 
-    if(go || bStep) {
-      bStep = false;
-      cudaMemcpy(dKinectMeters.ptr, depthBuffer, w*h*sizeof(float), cudaMemcpyHostToDevice);
-      roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
+    if(go) {
+      if(cam.Capture( *vImages ))
+      {
+        dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) vImages->at(0)->data(), w, h, w ));
+        roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
+        roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
 
-      roo::BoxReduceIgnoreInvalid<float,MaxLevels,float>(kin_d);
-      for(int l=0; l<MaxLevels; ++l) {
-        roo::DepthToVbo<float>(kin_v[l], kin_d[l], K[l] );
-        roo::NormalsFromVbo(kin_n[l], kin_v[l]);
+//        roo::BoxReduceIgnoreInvalid<float,MaxLevels,float>(kin_d);
+//        for(int l=0; l<MaxLevels; ++l) {
+//          roo::DepthToVbo<float>(kin_v[l], kin_d[l], K[l] );
+//          roo::NormalsFromVbo(kin_n[l], kin_v[l]);
+//        }
+
+        frame++;
       }
     }
 
@@ -288,22 +255,36 @@ int main( int argc, char* argv[] )
         }
 
         if(fuse) {
-          std::cout<<"Fusing . . . "<<std::endl;
-          Sophus::SE3d tempPose = start.inverse() * last;
-          const roo::BoundingBox roi(tempPose.matrix3x4(), w, h, K, knear,kfar);
-          roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
-          if(work_vol.IsValid()) {
-            const float trunc_dist = trunc_dist_factor*length(vol.VoxelSizeUnits());
-            roo::SdfFuse(work_vol, kin_d[0], kin_n[0], tempPose.inverse().matrix3x4(), K, trunc_dist, max_w, mincostheta );
+          for (int ii = 0; ii < vImages->Size(); ii++) {
+
+            // Transfer the captured image to the device
+            dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) vImages->at(ii)->data(), w, h, w ));
+            roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
+            roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
+
+
+            // Set Image Intrinsics for this particular camera
+            K = Ks[ vImages->at(ii)->SerialNumber() ].i;
+
+            // Set the pose relative to the rig and then to the
+            // frame of the SDF.
+            Sophus::SE3d tempPose = Ks[ vImages->at(ii)->SerialNumber() ].p;
+
+
+            const roo::BoundingBox roi(tempPose.matrix3x4(), w, h, K, knear,kfar);
+            roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
+            if(work_vol.IsValid()) {
+              const float trunc_dist = trunc_dist_factor*length(vol.VoxelSizeUnits());
+              roo::SdfFuse(work_vol, kin_d[0], kin_n[0], tempPose.inverse().matrix3x4(), K, trunc_dist, max_w, mincostheta );
+            }
           }
-          fuse = false;
         }
       }
     }
 
-    glcamera.SetPose(current_pose.matrix());
+    glcamera.SetPose(T_wl.matrix());
 
-    roo::BoundingBox bbox_work(current_pose.matrix3x4(), w, h, K.fu, K.fv, K.u0, K.v0, knear,kfar);
+    roo::BoundingBox bbox_work(T_wl.matrix3x4(), w, h, K.fu, K.fv, K.u0, K.v0, knear,kfar);
     bbox_work.Intersect(vol.bbox);
     glboxfrustum.SetBounds(roo::ToEigen(bbox_work.Min()), roo::ToEigen(bbox_work.Max()) );
 

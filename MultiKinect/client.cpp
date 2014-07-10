@@ -1,6 +1,7 @@
 #include <Node/Node.h>
 #include <Sophus/se3.hpp>
 #include <calibu/Calibu.h>
+#include <unistd.h>
 #include <HAL/Camera/CameraDevice.h>
 #include <HAL/Utils/GetPot>
 #include <PbMsgs/DensePose.pb.h>
@@ -24,7 +25,7 @@ bool send_data_( node::node* n, hal::Camera *cam )
   pbim->set_type( pb::PB_FLOAT );
   pbim->set_data( (const char*) pImages->at(0)->data() );
 
-  return n->publish("DepthImage", dpm);
+  return n->publish("DepthCam", dpm);
 }
 
 void register_cam_(pb::RegisterNodeCamReqMsg& req, pb::RegisterNodeCamRepMsg& rep, void* UserData)
@@ -70,6 +71,7 @@ int main( int argc, char* argv[] )
 
   while (1) {
     send_data_( &client, cam);
+    usleep( 1e6 /  60);
   }
 
   return 0;
