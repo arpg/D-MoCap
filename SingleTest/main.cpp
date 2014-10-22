@@ -272,8 +272,24 @@ int main( int argc, char* argv[] )
         if(fuse) {
           for (int ii = 0; ii < vImages->Size(); ii++) {
 
+            std::shared_ptr<pb::Image> im = vImages->at(ii);
+            if(im->Type() == pb::PB_UNSIGNED_SHORT)
+              dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) im->data(), w, h, w ));
+            else if(im->Type() == pb::PB_FLOAT)
+            {
+              cv::Mat mat = im->Mat();
+              cv::Mat ushort;
+              mat.convertTo(ushort, CV_16U);
+              dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>(ushort.ptr<unsigned short>(), w, h, w ));
+            }
+            else
+            {
+              std::cerr << "Unsupported type of image" << std::endl;
+              exit(1);
+            }
+
             // Transfer the captured image to the device
-            dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) vImages->at(ii)->data(), w, h, w ));
+//            dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) vImages->at(ii)->data(), w, h, w ));
             roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
             roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
 
