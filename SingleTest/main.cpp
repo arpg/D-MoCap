@@ -216,7 +216,6 @@ int main( int argc, char* argv[] )
 //          cv::imshow("test", temp);
 //          cv::waitKey();
           dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) im->data(), w, h, w*sizeof(unsigned short) ));
-          std::cout << "Unsigned Short" << std::endl;
         }
         else if(im->Type() == pb::PB_FLOAT)
         {
@@ -231,7 +230,6 @@ int main( int argc, char* argv[] )
           cv::Mat ushort;
           mat.convertTo(ushort, CV_16U);
           dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>(ushort.ptr<unsigned short>(), w, h, w*sizeof(unsigned short) ));
-          std::cout << "Float" << std::endl;
         }
         else
         {
@@ -279,13 +277,13 @@ int main( int argc, char* argv[] )
       const roo::BoundingBox roi(roo::BoundingBox(T_wl.inverse().matrix3x4(), w, h, K, 0, 50));
       roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
       if(work_vol.IsValid()) {
-//        for(int l=0; l<MaxLevels; ++l) {
-//          if(its[l] > 0) {
-//            const roo::ImageIntrinsics Kl = K[l];
-//            roo::RaycastSdf(ray_d[l], ray_n[l], ray_i[l], work_vol, T_vw.inverse().matrix3x4(), Kl, knear,kfar, trunc_dist, true );
-//            roo::DepthToVbo<float>(ray_v[l], ray_d[l], Kl );
-//          }
-//        }
+        for(int l=0; l<MaxLevels; ++l) {
+          if(its[l] > 0) {
+            const roo::ImageIntrinsics Kl = K[l];
+            roo::RaycastSdf(ray_d[l], ray_n[l], ray_i[l], work_vol, T_vw.inverse().matrix3x4(), Kl, knear,kfar, trunc_dist, true );
+            roo::DepthToVbo<float>(ray_v[l], ray_d[l], Kl );
+          }
+        }
 
         if(fuse) {
           for (int ii = 0; ii < vImages->Size(); ii++) {
