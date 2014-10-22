@@ -206,14 +206,32 @@ int main( int argc, char* argv[] )
       if(cam.Capture( *vImages ))
       {
         std::shared_ptr<pb::Image> im = vImages->at(0);
-        if(im->Type() == pb::PB_UNSIGNED_SHORT)
-          dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) im->data(), w, h, w ));
+        if(im->Type() == pb::PB_UNSIGNED_SHORT) {
+          cv::Mat mat = im->Mat();
+//          double min, max;
+//          cv::minMaxLoc(mat, &min, &max);
+//          cv::Mat temp(mat.rows, mat.cols, CV_32FC1);
+//          mat.copyTo(temp);
+//          temp = (temp - min) / (max - min);
+//          cv::imshow("test", temp);
+//          cv::waitKey();
+          dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) im->data(), w, h, w*sizeof(unsigned short) ));
+          std::cout << "Unsigned Short" << std::endl;
+        }
         else if(im->Type() == pb::PB_FLOAT)
         {
           cv::Mat mat = im->Mat();
+//          double min, max;
+//          cv::minMaxLoc(mat, &min, &max);
+//          cv::Mat temp(mat.rows, mat.cols, CV_32FC1);
+//          mat.copyTo(temp);
+//          temp = (temp - min) / (max - min);
+//          cv::imshow("test", temp);
+//          cv::waitKey();
           cv::Mat ushort;
           mat.convertTo(ushort, CV_16U);
-          dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>(ushort.ptr<unsigned short>(), w, h, w ));
+          dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>(ushort.ptr<unsigned short>(), w, h, w*sizeof(unsigned short) ));
+          std::cout << "Float" << std::endl;
         }
         else
         {
@@ -224,18 +242,18 @@ int main( int argc, char* argv[] )
         roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
         roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
 
-//        roo::BoxReduceIgnoreInvalid<float,MaxLevels,float>(kin_d);
-//        for(int l=0; l<MaxLevels; ++l) {
-//          roo::DepthToVbo<float>(kin_v[l], kin_d[l], K[l] );
-//          roo::NormalsFromVbo(kin_n[l], kin_v[l]);
-//        }
+        roo::BoxReduceIgnoreInvalid<float,MaxLevels,float>(kin_d);
+        for(int l=0; l<MaxLevels; ++l) {
+          roo::DepthToVbo<float>(kin_v[l], kin_d[l], K[l] );
+          roo::NormalsFromVbo(kin_n[l], kin_v[l]);
+        }
 
         frame++;
       }
     }
 
     Sophus::SE3d T_vw(s_cam.GetModelViewMatrix());
-    if(viewonly) {
+    if(viewonly) {      
 
       const roo::BoundingBox roi(T_vw.inverse().matrix3x4(), w, h, K, 0, 50);
       roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
@@ -261,26 +279,26 @@ int main( int argc, char* argv[] )
       const roo::BoundingBox roi(roo::BoundingBox(T_wl.inverse().matrix3x4(), w, h, K, 0, 50));
       roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
       if(work_vol.IsValid()) {
-        for(int l=0; l<MaxLevels; ++l) {
-          if(its[l] > 0) {
-            const roo::ImageIntrinsics Kl = K[l];
-            roo::RaycastSdf(ray_d[l], ray_n[l], ray_i[l], work_vol, T_vw.inverse().matrix3x4(), Kl, knear,kfar, trunc_dist, true );
-            roo::DepthToVbo<float>(ray_v[l], ray_d[l], Kl );
-          }
-        }
+//        for(int l=0; l<MaxLevels; ++l) {
+//          if(its[l] > 0) {
+//            const roo::ImageIntrinsics Kl = K[l];
+//            roo::RaycastSdf(ray_d[l], ray_n[l], ray_i[l], work_vol, T_vw.inverse().matrix3x4(), Kl, knear,kfar, trunc_dist, true );
+//            roo::DepthToVbo<float>(ray_v[l], ray_d[l], Kl );
+//          }
+//        }
 
         if(fuse) {
           for (int ii = 0; ii < vImages->Size(); ii++) {
 
             std::shared_ptr<pb::Image> im = vImages->at(ii);
             if(im->Type() == pb::PB_UNSIGNED_SHORT)
-              dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) im->data(), w, h, w ));
+              dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) im->data(), w, h, w*sizeof(unsigned short) ));
             else if(im->Type() == pb::PB_FLOAT)
             {
               cv::Mat mat = im->Mat();
               cv::Mat ushort;
               mat.convertTo(ushort, CV_16U);
-              dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>(ushort.ptr<unsigned short>(), w, h, w ));
+              dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>(ushort.ptr<unsigned short>(), w, h, w*sizeof(unsigned short) ));
             }
             else
             {
@@ -293,6 +311,11 @@ int main( int argc, char* argv[] )
             roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
             roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
 
+            roo::BoxReduceIgnoreInvalid<float,MaxLevels,float>(kin_d);
+            for(int l=0; l<MaxLevels; ++l) {
+              roo::DepthToVbo<float>(kin_v[l], kin_d[l], K[l] );
+              roo::NormalsFromVbo(kin_n[l], kin_v[l]);
+            }
 
             // Set Image Intrinsics for this particular camera
             K = Ks[ vImages->at(ii)->SerialNumber() ].i;
