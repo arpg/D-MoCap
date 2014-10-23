@@ -39,6 +39,17 @@ struct pni {  // pose 'n' intrinsics
   roo::ImageIntrinsics i;
 };
 
+// camera serial number -> camera pose and intrinsics
+typedef std::map<uint64_t, pni> cameraMap;
+
+// Creates a cameraMap from the calibu camera rig
+void getCameraCalibration(const calibu::CameraRig &rig,
+                          cameraMap& Ks);
+
+// Copies a pb image into a kangaroo image
+void copyFrom(const std::shared_ptr<pb::Image>& pbim,
+              roo::Image<unsigned short, roo::TargetDevice, roo::Manage>& kim);
+
 int main( int argc, char* argv[] )
 {
   // Initialise window
@@ -56,25 +67,16 @@ int main( int argc, char* argv[] )
     rig = calibu::ReadXmlRig(cam.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod"));
   }
   else {
+    std::cout << "in second option" << std::endl;
     rig = calibu::ReadXmlRig(clArgs.follow("cameras.xml", "-cmod"));
   }
 
-  Eigen::Matrix3d KL;
+  cameraMap Ks;
+  getCameraCalibration(rig, Ks);
 
-  std::map< long int, pni > Ks;
-  for (int ii = 0; ii < rig.cameras.size(); ii++ ){
-    KL = rig.cameras[ii].camera.K();
-    pni temp;
-    roo::ImageIntrinsics temp_i(KL(0, 0),KL(1, 1), KL(0, 2), KL(1, 2) );
-    temp.i = temp_i;
-    temp.p = rig.cameras[ii].T_wc;
-    Ks.insert( std::pair< long int, pni >(rig.cameras[ii].camera.SerialNumber() , temp ) );
-  }
-
-
-  int w = cam.Width();
-  int h = cam.Height();
-
+  const int w = cam.Width();
+  const int h = cam.Height();
+  const int N = cam.NumChannels(); // number of input depth images
 
   ///----- Init aux variables and dense tracker.
 
@@ -83,12 +85,13 @@ int main( int argc, char* argv[] )
   const int MaxLevels = 3;
   const int its[] = {1,0,2,3};
 
-  roo::ImageIntrinsics K(KL(0, 0),KL(1, 1), KL(0, 2), KL(1, 2) );
+  //roo::ImageIntrinsics K(KL(0, 0),KL(1, 1), KL(0, 2), KL(1, 2) );
+  roo::ImageIntrinsics K = Ks.rbegin()->second.i;
 
   const double knear = 0.01;
-  const double kfar = 1.0;
+  const double kfar = 3.0;
 
-  const float volrad = 0.250;
+  const float volrad = 1.0;
   const int volres = 256;
 
   roo::BoundingBox reset_bb(make_float3(-volrad,-volrad,knear), make_float3(volrad,volrad,knear+2*volrad));
@@ -161,14 +164,15 @@ int main( int argc, char* argv[] )
   ActivateDrawImage<float4> addebug( dDebug, GL_RGBA32F_ARB, false, true);
 
   Handler3DDepth<float,roo::TargetDevice> rayhandler(ray_d[0], s_cam, AxisNone);
-  SetupContainer(container, 4, (float)w/h);
+  SetupContainer(container, 3+N, (float)w/h);
   container[0].SetDrawFunction(std::ref(adrayimg))
       .SetHandler(&rayhandler);
   container[1].SetDrawFunction(SceneGraph::ActivateDrawFunctor(glgraph, s_cam))
       .SetHandler( new Handler3D(s_cam, AxisNone) );
   container[2].SetDrawFunction(std::ref(use_colour?adraycolor:adraynorm))
       .SetHandler(&rayhandler);
-  container[3].SetDrawFunction(std::ref(adnormals));
+  for(int i = 0; i < N; ++i)
+    container[3+i].SetDrawFunction(std::ref(adnormals));
 
   SceneGraph::ImageView depthView;
   SceneGraph::ImageView currentView;
@@ -201,42 +205,10 @@ int main( int argc, char* argv[] )
       frame = -1;
     }
 
-
     if(go) {
       if(cam.Capture( *vImages ))
       {
-        std::shared_ptr<pb::Image> im = vImages->at(0);
-        if(im->Type() == pb::PB_UNSIGNED_SHORT) {
-          cv::Mat mat = im->Mat();
-//          double min, max;
-//          cv::minMaxLoc(mat, &min, &max);
-//          cv::Mat temp(mat.rows, mat.cols, CV_32FC1);
-//          mat.copyTo(temp);
-//          temp = (temp - min) / (max - min);
-//          cv::imshow("test", temp);
-//          cv::waitKey();
-          dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) im->data(), w, h, w*sizeof(unsigned short) ));
-        }
-        else if(im->Type() == pb::PB_FLOAT)
-        {
-          cv::Mat mat = im->Mat();
-//          double min, max;
-//          cv::minMaxLoc(mat, &min, &max);
-//          cv::Mat temp(mat.rows, mat.cols, CV_32FC1);
-//          mat.copyTo(temp);
-//          temp = (temp - min) / (max - min);
-//          cv::imshow("test", temp);
-//          cv::waitKey();
-          cv::Mat ushort;
-          mat.convertTo(ushort, CV_16U);
-          dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>(ushort.ptr<unsigned short>(), w, h, w*sizeof(unsigned short) ));
-        }
-        else
-        {
-          std::cerr << "Unsupported type of image" << std::endl;
-          exit(1);
-        }
-
+        copyFrom(vImages->at(0), dKinect);
         roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
         roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
 
@@ -288,24 +260,9 @@ int main( int argc, char* argv[] )
         if(fuse) {
           for (int ii = 0; ii < vImages->Size(); ii++) {
 
-            std::shared_ptr<pb::Image> im = vImages->at(ii);
-            if(im->Type() == pb::PB_UNSIGNED_SHORT)
-              dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) im->data(), w, h, w*sizeof(unsigned short) ));
-            else if(im->Type() == pb::PB_FLOAT)
-            {
-              cv::Mat mat = im->Mat();
-              cv::Mat ushort;
-              mat.convertTo(ushort, CV_16U);
-              dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>(ushort.ptr<unsigned short>(), w, h, w*sizeof(unsigned short) ));
-            }
-            else
-            {
-              std::cerr << "Unsupported type of image" << std::endl;
-              exit(1);
-            }
-
             // Transfer the captured image to the device
-//            dKinect.CopyFrom(roo::Image<unsigned short, roo::TargetHost>((unsigned short*) vImages->at(ii)->data(), w, h, w ));
+            copyFrom(vImages->at(ii), dKinect);
+
             roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
             roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
 
@@ -316,12 +273,12 @@ int main( int argc, char* argv[] )
             }
 
             // Set Image Intrinsics for this particular camera
+            assert(Ks.find(vImages->at(ii)->SerialNumber()) != Ks.end());
             K = Ks[ vImages->at(ii)->SerialNumber() ].i;
 
             // Set the pose relative to the rig and then to the
             // frame of the SDF.
             Sophus::SE3d tempPose = Ks[ vImages->at(ii)->SerialNumber() ].p;
-
 
             const roo::BoundingBox roi(tempPose.matrix3x4(), w, h, K, knear,kfar);
             roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
@@ -351,4 +308,39 @@ int main( int argc, char* argv[] )
     pangolin::FinishFrame();
   }
   return 0;
+}
+
+void getCameraCalibration(const calibu::CameraRig &rig,
+                          cameraMap& Ks)
+{
+  Ks.clear();
+  for (int ii = 0; ii < rig.cameras.size(); ii++ ){
+    Eigen::Matrix3d KL = rig.cameras[ii].camera.K();
+    pni temp;
+    roo::ImageIntrinsics temp_i(KL(0, 0),KL(1, 1), KL(0, 2), KL(1, 2) );
+    temp.i = temp_i;
+    temp.p = rig.cameras[ii].T_wc;
+    Ks.insert( std::pair<uint64_t, pni >(rig.cameras[ii].camera.SerialNumber() , temp ) );
+  }
+}
+
+void copyFrom(const std::shared_ptr<pb::Image>& pbim,
+              roo::Image<unsigned short, roo::TargetDevice, roo::Manage>& kim)
+{
+  cv::Mat mat;
+  if(pbim->Type() == pb::PB_UNSIGNED_SHORT)
+    mat = pbim->Mat();
+  else if(pbim->Type() == pb::PB_FLOAT)
+  {
+    cv::Mat src = pbim->Mat();
+    src.convertTo(mat, CV_16U);
+  }
+  else
+  {
+    std::cerr << "Unsupported type of image" << std::endl;
+    exit(1);
+  }
+  kim.CopyFrom(roo::Image<unsigned short, roo::TargetHost>
+               (mat.ptr<unsigned short>(), mat.cols, mat.rows,
+                mat.cols * sizeof(unsigned short)));
 }
