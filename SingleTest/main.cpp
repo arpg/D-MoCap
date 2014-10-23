@@ -50,6 +50,10 @@ void getCameraCalibration(const calibu::CameraRig &rig,
 void copyFrom(const std::shared_ptr<pb::Image>& pbim,
               roo::Image<unsigned short, roo::TargetDevice, roo::Manage>& kim);
 
+// Sets a depth image to the display
+void setDepthImages(const std::shared_ptr<pb::ImageArray>& pbim,
+                    std::vector<SceneGraph::ImageView>& views);
+
 int main( int argc, char* argv[] )
 {
   // Initialise window
@@ -74,9 +78,16 @@ int main( int argc, char* argv[] )
   cameraMap Ks;
   getCameraCalibration(rig, Ks);
 
+  if(Ks.size() != cam.NumChannels())
+  {
+    std::cout << "Error: the number of cameras (" << cam.NumChannels()
+              << ") differs from the number of models in the calibration file ("
+              << Ks.size() << ")" << std::endl;
+    exit(2);
+  }
+
   const int w = cam.Width();
   const int h = cam.Height();
-  const int N = cam.NumChannels(); // number of input depth images
 
   ///----- Init aux variables and dense tracker.
 
@@ -89,9 +100,9 @@ int main( int argc, char* argv[] )
   roo::ImageIntrinsics K = Ks.rbegin()->second.i;
 
   const double knear = 0.01;
-  const double kfar = 3.0;
+  const double kfar = 4.0;
 
-  const float volrad = 1.0;
+  const float volrad = 2.0;
   const int volres = 256;
 
   roo::BoundingBox reset_bb(make_float3(-volrad,-volrad,knear), make_float3(volrad,volrad,knear+2*volrad));
@@ -164,20 +175,18 @@ int main( int argc, char* argv[] )
   ActivateDrawImage<float4> addebug( dDebug, GL_RGBA32F_ARB, false, true);
 
   Handler3DDepth<float,roo::TargetDevice> rayhandler(ray_d[0], s_cam, AxisNone);
-  SetupContainer(container, 3+N, (float)w/h);
+  SetupContainer(container, 3, (float)w/h);
   container[0].SetDrawFunction(std::ref(adrayimg))
       .SetHandler(&rayhandler);
   container[1].SetDrawFunction(SceneGraph::ActivateDrawFunctor(glgraph, s_cam))
       .SetHandler( new Handler3D(s_cam, AxisNone) );
   container[2].SetDrawFunction(std::ref(use_colour?adraycolor:adraynorm))
       .SetHandler(&rayhandler);
-  for(int i = 0; i < N; ++i)
-    container[3+i].SetDrawFunction(std::ref(adnormals));
+  //container[3].SetDrawFunction(std::ref(adnormals));
 
-  SceneGraph::ImageView depthView;
-  SceneGraph::ImageView currentView;
-  container.AddDisplay( depthView );
-  container.AddDisplay( currentView );
+  std::vector<SceneGraph::ImageView> depthViews(cam.NumChannels());
+  for(size_t i = 0; i < depthViews.size(); ++i)
+    container.AddDisplay( depthViews[i] );
 
   Sophus::SE3d T_wl;
 
@@ -193,9 +202,6 @@ int main( int argc, char* argv[] )
 
   for(long frame=-1; !pangolin::ShouldQuit();)
   {
-
-    const bool go = !viewonly && (frame==-1 || run);
-
     const float trunc_dist = trunc_dist_factor*length(vol.VoxelSizeUnits());
 
     if(pangolin::Pushed(reset)) {
@@ -205,91 +211,80 @@ int main( int argc, char* argv[] )
       frame = -1;
     }
 
-    if(go) {
-      if(cam.Capture( *vImages ))
-      {
-        copyFrom(vImages->at(0), dKinect);
-        roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
-        roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
+    if(run)
+    {
+      cam.Capture( *vImages );
+      setDepthImages(vImages, depthViews);
 
-        roo::BoxReduceIgnoreInvalid<float,MaxLevels,float>(kin_d);
-        for(int l=0; l<MaxLevels; ++l) {
-          roo::DepthToVbo<float>(kin_v[l], kin_d[l], K[l] );
-          roo::NormalsFromVbo(kin_n[l], kin_v[l]);
-        }
+      Sophus::SE3d T_vw(s_cam.GetModelViewMatrix());
+      if(viewonly) {
 
-        frame++;
-      }
-    }
+        const roo::BoundingBox roi(T_vw.inverse().matrix3x4(), w, h, K, 0, 50);
+        roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
+        if(work_vol.IsValid()) {
+          roo::RaycastSdf(ray_d[0], ray_n[0], ray_i[0], work_vol, T_vw.inverse().matrix3x4(), K, 0.1, 50, trunc_dist, true );
 
-    Sophus::SE3d T_vw(s_cam.GetModelViewMatrix());
-    if(viewonly) {      
-
-      const roo::BoundingBox roi(T_vw.inverse().matrix3x4(), w, h, K, 0, 50);
-      roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
-      if(work_vol.IsValid()) {
-        roo::RaycastSdf(ray_d[0], ray_n[0], ray_i[0], work_vol, T_vw.inverse().matrix3x4(), K, 0.1, 50, trunc_dist, true );
-
-        if(keyframes.size() > 0) {
-          // populate kfs
-          for( int k=0; k< kfs.Rows(); k++)
-          {
-            if(k < keyframes.size()) {
-              kfs[k].img = keyframes[k]->img;
-              kfs[k].T_iw = keyframes[k]->T_iw.matrix3x4();
-              kfs[k].K = roo::ImageIntrinsics(rgb_fl, kfs[k].img);
-            }else{
-              kfs[k].img.ptr = 0;
+          if(keyframes.size() > 0) {
+            // populate kfs
+            for( int k=0; k< kfs.Rows(); k++)
+            {
+              if(k < keyframes.size()) {
+                kfs[k].img = keyframes[k]->img;
+                kfs[k].T_iw = keyframes[k]->T_iw.matrix3x4();
+                kfs[k].K = roo::ImageIntrinsics(rgb_fl, kfs[k].img);
+              }else{
+                kfs[k].img.ptr = 0;
+              }
             }
-          }
-          roo::TextureDepth<float4,uchar3,10>(ray_c[0], kfs, ray_d[0], ray_n[0], ray_i[0], T_vw.inverse().matrix3x4(), K);
-        }
-      }
-    }else{
-      const roo::BoundingBox roi(roo::BoundingBox(T_wl.inverse().matrix3x4(), w, h, K, 0, 50));
-      roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
-      if(work_vol.IsValid()) {
-        for(int l=0; l<MaxLevels; ++l) {
-          if(its[l] > 0) {
-            const roo::ImageIntrinsics Kl = K[l];
-            roo::RaycastSdf(ray_d[l], ray_n[l], ray_i[l], work_vol, T_vw.inverse().matrix3x4(), Kl, knear,kfar, trunc_dist, true );
-            roo::DepthToVbo<float>(ray_v[l], ray_d[l], Kl );
+            roo::TextureDepth<float4,uchar3,10>(ray_c[0], kfs, ray_d[0], ray_n[0], ray_i[0], T_vw.inverse().matrix3x4(), K);
           }
         }
-
-        if(fuse) {
-          for (int ii = 0; ii < vImages->Size(); ii++) {
-
-            // Transfer the captured image to the device
-            copyFrom(vImages->at(ii), dKinect);
-
-            roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
-            roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
-
-            roo::BoxReduceIgnoreInvalid<float,MaxLevels,float>(kin_d);
-            for(int l=0; l<MaxLevels; ++l) {
-              roo::DepthToVbo<float>(kin_v[l], kin_d[l], K[l] );
-              roo::NormalsFromVbo(kin_n[l], kin_v[l]);
-            }
-
-            // Set Image Intrinsics for this particular camera
-            assert(Ks.find(vImages->at(ii)->SerialNumber()) != Ks.end());
-            K = Ks[ vImages->at(ii)->SerialNumber() ].i;
-
-            // Set the pose relative to the rig and then to the
-            // frame of the SDF.
-            Sophus::SE3d tempPose = Ks[ vImages->at(ii)->SerialNumber() ].p;
-
-            const roo::BoundingBox roi(tempPose.matrix3x4(), w, h, K, knear,kfar);
-            roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
-            if(work_vol.IsValid()) {
-              const float trunc_dist = trunc_dist_factor*length(vol.VoxelSizeUnits());
-              roo::SdfFuse(work_vol, kin_d[0], kin_n[0], tempPose.inverse().matrix3x4(), K, trunc_dist, max_w, mincostheta );
+      }else{
+        const roo::BoundingBox roi(roo::BoundingBox(T_wl.inverse().matrix3x4(), w, h, K, 0, 50));
+        roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
+        if(work_vol.IsValid()) {
+          for(int l=0; l<MaxLevels; ++l) {
+            if(its[l] > 0) {
+              const roo::ImageIntrinsics Kl = K[l];
+              roo::RaycastSdf(ray_d[l], ray_n[l], ray_i[l], work_vol, T_vw.inverse().matrix3x4(), Kl, knear,kfar, trunc_dist, true );
+              roo::DepthToVbo<float>(ray_v[l], ray_d[l], Kl );
             }
           }
-        }
-      }
-    }
+
+          if(fuse) {
+            for (int ii = 0; ii < vImages->Size(); ii++) {
+
+              // Transfer the captured image to the device
+              copyFrom(vImages->at(ii), dKinect);
+
+              roo::ElementwiseScaleBias<float,unsigned short,float>(dKinectMeters, dKinect, 1.0f/1000.0f);  // OpenNI outputs in millimeters
+              roo::BilateralFilter<float,float>(kin_d[0],dKinectMeters,bigs,bigr,biwin,0.2);
+
+              roo::BoxReduceIgnoreInvalid<float,MaxLevels,float>(kin_d);
+              for(int l=0; l<MaxLevels; ++l) {
+                roo::DepthToVbo<float>(kin_v[l], kin_d[l], K[l] );
+                roo::NormalsFromVbo(kin_n[l], kin_v[l]);
+              }
+
+              // Set Image Intrinsics for this particular camera
+              assert(Ks.find(vImages->at(ii)->SerialNumber()) != Ks.end());
+              K = Ks[ vImages->at(ii)->SerialNumber() ].i;
+
+              // Set the pose relative to the rig and then to the
+              // frame of the SDF.
+              Sophus::SE3d tempPose = Ks[ vImages->at(ii)->SerialNumber() ].p;
+
+              const roo::BoundingBox roi(tempPose.matrix3x4(), w, h, K, knear,kfar);
+              roo::BoundedVolume<roo::SDF_t> work_vol = vol.SubBoundingVolume( roi );
+              if(work_vol.IsValid()) {
+                const float trunc_dist = trunc_dist_factor*length(vol.VoxelSizeUnits());
+                roo::SdfFuse(work_vol, kin_d[0], kin_n[0], tempPose.inverse().matrix3x4(), K, trunc_dist, max_w, mincostheta );
+              }
+            }
+          } // if fuse
+        } // if work vol is valid
+      } // if !view only
+    } // if run
 
     glcamera.SetPose(T_wl.matrix());
 
@@ -343,4 +338,15 @@ void copyFrom(const std::shared_ptr<pb::Image>& pbim,
   kim.CopyFrom(roo::Image<unsigned short, roo::TargetHost>
                (mat.ptr<unsigned short>(), mat.cols, mat.rows,
                 mat.cols * sizeof(unsigned short)));
+}
+
+void setDepthImages(const std::shared_ptr<pb::ImageArray>& pbims,
+                    std::vector<SceneGraph::ImageView>& views)
+{
+  for(int i = 0; i < pbims->Size(); ++i) {
+    views[i].SetImage(pbims->at(i)->data(), pbims->at(i)->Width(),
+                      pbims->at(i)->Height(),
+                      GL_LUMINANCE, GL_LUMINANCE, GL_FLOAT, true);
+    views[i].UpdateGlTexture();
+  }
 }
