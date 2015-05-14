@@ -43,15 +43,15 @@ struct pni {  // pose 'n' intrinsics
 typedef std::map<uint64_t, pni> cameraMap;
 
 // Creates a cameraMap from the calibu camera rig
-void getCameraCalibration(const calibu::CameraRig &rig,
+void getCameraCalibration(const std::shared_ptr<calibu::Rigd> &rig,
                           cameraMap& Ks);
 
 // Copies a pb image into a kangaroo image
-void copyFrom(const std::shared_ptr<pb::Image>& pbim,
+void copyFrom(const std::shared_ptr<hal::Image>& pbim,
               roo::Image<unsigned short, roo::TargetDevice, roo::Manage>& kim);
 
 // Sets a depth image to the display
-void setDepthImages(const std::shared_ptr<pb::ImageArray>& pbim,
+void setDepthImages(const std::shared_ptr<hal::ImageArray>& pbim,
                     std::vector<SceneGraph::ImageView>& views);
 
 int main( int argc, char* argv[] )
@@ -64,8 +64,8 @@ int main( int argc, char* argv[] )
 
   ///----- Load camera model.
   hal::Camera cam(clArgs.follow("", "-cam"));
-  std::shared_ptr< pb::ImageArray > vImages = pb::ImageArray::Create();
-  calibu::CameraRig rig;
+  std::shared_ptr< hal::ImageArray > vImages = hal::ImageArray::Create();
+  std::shared_ptr<calibu::Rigd> rig;
   if (!cam.GetDeviceProperty(hal::DeviceDirectory).empty()) {
     std::cout<<"Loaded camera: "<<cam.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod")<<std::endl;
     rig = calibu::ReadXmlRig(cam.GetDeviceProperty(hal::DeviceDirectory) + '/' + clArgs.follow("cameras.xml", "-cmod"));
@@ -305,27 +305,27 @@ int main( int argc, char* argv[] )
   return 0;
 }
 
-void getCameraCalibration(const calibu::CameraRig &rig,
+void getCameraCalibration(const std::shared_ptr<calibu::Rigd> &rig,
                           cameraMap& Ks)
 {
   Ks.clear();
-  for (int ii = 0; ii < rig.cameras.size(); ii++ ){
-    Eigen::Matrix3d KL = rig.cameras[ii].camera.K();
+  for (int ii = 0; ii < rig->cameras_.size(); ii++ ){
+    Eigen::Matrix3d KL = rig->cameras_[ii]->K();
     pni temp;
     roo::ImageIntrinsics temp_i(KL(0, 0),KL(1, 1), KL(0, 2), KL(1, 2) );
     temp.i = temp_i;
-    temp.p = rig.cameras[ii].T_wc;
-    Ks.insert( std::pair<uint64_t, pni >(rig.cameras[ii].camera.SerialNumber() , temp ) );
+    temp.p = rig->cameras_[ii]->Pose();
+    Ks.insert( std::pair<uint64_t, pni >(rig->cameras_[ii]->SerialNumber(), temp ) );
   }
 }
 
-void copyFrom(const std::shared_ptr<pb::Image>& pbim,
+void copyFrom(const std::shared_ptr<hal::Image>& pbim,
               roo::Image<unsigned short, roo::TargetDevice, roo::Manage>& kim)
 {
   cv::Mat mat;
-  if(pbim->Type() == pb::PB_UNSIGNED_SHORT)
+  if(pbim->Type() == hal::PB_UNSIGNED_SHORT)
     mat = pbim->Mat();
-  else if(pbim->Type() == pb::PB_FLOAT)
+  else if(pbim->Type() == hal::PB_FLOAT)
   {
     cv::Mat src = pbim->Mat();
     src.convertTo(mat, CV_16U);
@@ -340,7 +340,7 @@ void copyFrom(const std::shared_ptr<pb::Image>& pbim,
                 mat.cols * sizeof(unsigned short)));
 }
 
-void setDepthImages(const std::shared_ptr<pb::ImageArray>& pbims,
+void setDepthImages(const std::shared_ptr<hal::ImageArray>& pbims,
                     std::vector<SceneGraph::ImageView>& views)
 {
   for(int i = 0; i < pbims->Size(); ++i) {

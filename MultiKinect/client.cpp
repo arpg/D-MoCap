@@ -1,78 +1,66 @@
-#include <Node/Node.h>
-#include <Sophus/se3.hpp>
+#include <node/Node.h>
+#include <sophus/se3.hpp>
 #include <calibu/Calibu.h>
 #include <unistd.h>
 #include <HAL/Camera/CameraDevice.h>
 #include <HAL/Utils/GetPot>
-#include <PbMsgs/DensePose.pb.h>
-#include <PbMsgs/Matrix.h>
+#include <HAL/Messages/Pose.h>
+#include <HAL/Messages/Matrix.h>
+#include <HAL/NodeCamMessage.pb.h>
 
 Eigen::Matrix3d K;
 int w, h;
 
-bool send_data_( node::node* n, hal::Camera *cam )
-{
-  std::shared_ptr<pb::ImageArray> pImages = pb::ImageArray::Create();
-  pb::DensePoseMsg dpm;
-  pb::CameraMsg cam_msg_ = dpm.image();
-  pb::ImageMsg* pbim = cam_msg_.add_image();
+bool send_data_(node::node* n, hal::Camera *cam) {
+	std::shared_ptr<hal::ImageArray> pImages = hal::ImageArray::Create();
 
-  cam->Capture( *pImages );
+	cam->Capture(*pImages);
 
-  pbim->set_width( w );
-  pbim->set_height( h );
-  pbim->set_format( pb::PB_LUMINANCE );
-  pbim->set_type( pb::PB_FLOAT );
-  pbim->set_data( (const char*) pImages->at(0)->data() );
+	hal::Msg msg;
+	msg.mutable_camera()->Swap(&pImages->Ref());
 
-  return n->publish("DepthCam", dpm);
+	return n->publish("DepthCam", msg);
 }
 
-void register_cam_(pb::RegisterNodeCamReqMsg& req, pb::RegisterNodeCamRepMsg& rep, void* UserData)
-{
-  rep.set_regsiter_flag(1);
-  rep.set_width(w);
-  rep.set_height(h);
-  pb::MatrixMsg Kmsg;
-  pb::WriteMatrix( K, &Kmsg );
+void register_cam_(RegisterNodeCamReqMsg& req, RegisterNodeCamRepMsg& rep, void* UserData) {
+	rep.set_regsiter_flag(1);
+	rep.set_width(w);
+	rep.set_height(h);
+	hal::MatrixMsg Kmsg;
+	hal::WriteMatrix(K, &Kmsg);
 }
 
+int main(int argc, char* argv[]) {
+	node::node client;
+	GetPot cl(argc, argv);
 
-int main( int argc, char* argv[] )
-{
-  node::node client;
-  GetPot cl(argc, argv);
+	hal::Camera* cam;
+	if (!cl.search("-cam")) {
+		fprintf(stderr, "Camera must be provided.\n");
+		fflush(stderr);
+		exit(1);
+	} else {
+		cam = new hal::Camera(cl.follow("", "-cam"));
+	}
 
-  hal::Camera* cam;
-  if (!cl.search("-cam")) {
-    fprintf(stderr, "Camera must be provided.\n");
-    fflush(stderr);
-    exit(1);
-  } else {
-    cam = new hal::Camera(cl.follow("", "-cam"));
-  }
+	K << 1, 0, 0, 0, 1, 0, 0, 0, 1;
+	if (cl.search("-cmod")) {
+		std::shared_ptr<calibu::Rigd> rig = calibu::ReadXmlRig(cl.follow("cameras.xml", "-cmod"));
+		K = rig->cameras_[0]->K();
+	}
 
-  K << 1, 0, 0,
-       0, 1, 0,
-       0, 0, 1;
-  if (cl.search("-cmod")) {
-  calibu::CameraRig rig = calibu::ReadXmlRig(cl.follow("cameras.xml", "-cmod"));
-  K = rig.cameras[0].camera.K();
-  }
+	w = cam->Width();
+	h = cam->Height();
 
-  w = cam->Width();
-  h = cam->Height();
+	client.set_verbosity(9);
+	client.init(cl.follow("localsim", "-name"));
+	client.advertise("DepthCam");
+	client.provide_rpc("register_cam_", &register_cam_, NULL);
 
-  client.set_verbosity(9);
-  client.init( cl.follow("localsim", "-name"));
-  client.advertise("DepthCam");
-  client.provide_rpc("register_cam_", &register_cam_, NULL);
+	while (1) {
+		send_data_(&client, cam);
+		usleep(1e6 / 60);
+	}
 
-
-  while (1) {
-    send_data_( &client, cam);
-    usleep( 1e6 /  60);
-  }
-
-  return 0;
+	return 0;
 }
